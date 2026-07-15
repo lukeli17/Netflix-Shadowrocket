@@ -1,7 +1,7 @@
-/* Netflix Official Dual Subtitles v1.7 for Shadowrocket.
+/* Netflix Official Dual Subtitles v1.8 diagnostic for Shadowrocket.
  * Current selected official track on top, previously selected official track below.
- * Uses a compact independent timeline inside the current Netflix Range window.
- * Keeps real cue changes and standalone captions while suppressing small boundary tails.
+ * Marks one original cue and inserts one new cue at the same timestamp.
+ * Logs the byte Range and parsed time window to identify Netflix's acceptance boundary.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -415,6 +415,37 @@ function firstCueNumber(part) {
   return 1;
 }
 
+function injectProbe(body, target) {
+  const text = String(body || "");
+  const crlfHead = target.head.replace(/\n/g, "\r\n");
+  const matchedHead = text.includes(target.head) ? target.head : crlfHead;
+  const headAt = text.indexOf(matchedHead);
+  if (headAt < 0) return null;
+  const searchAt = headAt + matchedHead.length;
+  const lfBoundary = text.indexOf("\n\n", searchAt);
+  const crlfBoundary = text.indexOf("\r\n\r\n", searchAt);
+  let blockEnd = text.length;
+  let separator = text.includes("\r\n") ? "\r\n\r\n" : "\n\n";
+  if (lfBoundary >= 0 && (crlfBoundary < 0 || lfBoundary < crlfBoundary)) {
+    blockEnd = lfBoundary;
+    separator = "\n\n";
+  } else if (crlfBoundary >= 0) {
+    blockEnd = crlfBoundary;
+    separator = "\r\n\r\n";
+  }
+  const newline = separator.startsWith("\r\n") ? "\r\n" : "\n";
+  const extra = [
+    999999,
+    `${formatTime(target.s)} --> ${formatTime(target.e)}`,
+    EMPTY_TRACK_PLACEHOLDER,
+    "【新增块】",
+  ].join(newline);
+  const tailAt = blockEnd < text.length ? blockEnd + separator.length : blockEnd;
+  const tail = text.slice(tailAt);
+  const suffix = tail ? `${separator}${tail}` : newline;
+  return `${text.slice(0, blockEnd)}${newline}【原块】${separator}${extra}${suffix}`;
+}
+
 function merge(body, currentBody, otherBody) {
   const part = parse(body);
   const top = parse(currentBody);
@@ -422,23 +453,15 @@ function merge(body, currentBody, otherBody) {
   if (!part.length || !top.length || !bottom.length) return body;
   const matches = matchTopCues(part, top).filter(Boolean);
   if (!matches.length) return body;
-  const windowStart = Math.min(...part.map((cue) => cue.s));
-  const windowEnd = Math.max(...part.map((cue) => cue.e));
-  normalizeBoundaries(top, bottom);
-  const standaloneTop = standaloneCueIds(top, bottom);
-  const standaloneBottom = standaloneCueIds(bottom, top);
-  const segments = simplifyArtificialFragments(buildUnionTimeline(top, bottom))
-    .filter((segment) => segment.e > windowStart && segment.s < windowEnd)
-    .map((segment) => ({ ...segment, s: Math.max(segment.s, windowStart), e: Math.min(segment.e, windowEnd) }))
-    .filter((segment) => segment.e > segment.s);
-  if (!segments.length) return body;
-  const startNumber = firstCueNumber(part);
-  const output = `${segments.map((segment, index) => [
-    startNumber + index,
-    `${formatTime(segment.s)} --> ${formatTime(segment.e)}`,
-    ...segmentLines(segment, standaloneTop, standaloneBottom),
-  ].join("\n")).join("\n\n")}\n`;
-  console.log(`[NFOfficialDual] compact-range cues=${part.length}->${segments.length} bytes=${String(body).length}->${output.length}`);
+  const target = part[0];
+  const output = injectProbe(body, target);
+  if (!output) return body;
+  const requestRange = header($request.headers, "Range") || "-";
+  const contentRange = header($response.headers, "Content-Range") || "-";
+  const contentLength = header($response.headers, "Content-Length") || "-";
+  const windowStart = formatTime(part[0].s);
+  const windowEnd = formatTime(Math.max(...part.map((cue) => cue.e)));
+  console.log(`[NFOfficialDual] range-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length + 1} window=${windowStart}..${windowEnd} probe=${formatTime(target.s)}..${formatTime(target.e)} bytes=${String(body).length}->${output.length}`);
   return output;
 }
 
