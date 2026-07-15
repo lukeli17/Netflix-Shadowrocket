@@ -5,7 +5,7 @@
 #!version = 1.3
 
 [Script]
-Netflix Official Dual v1.3 = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js, timeout=10
+Netflix Official Dual v1.3 = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js?v=1.3, timeout=10
 
 [MITM]
 hostname = %APPEND% *.oca.nflxvideo.net
