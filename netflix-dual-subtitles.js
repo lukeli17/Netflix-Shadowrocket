@@ -1,7 +1,7 @@
-/* Netflix Official Dual Subtitles v1.4 for Shadowrocket.
+/* Netflix Official Dual Subtitles v1.5 diagnostic for Shadowrocket.
  * Current selected official track on top, previously selected official track below.
- * Uses independent timelines inside the current Netflix Range window.
- * Keeps original markup on the selected track; the secondary track is plain text.
+ * Preserves every original Range cue byte-for-byte and inserts exactly one extra cue.
+ * This build isolates whether Netflix rejects any Range cue-count change.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -415,6 +415,22 @@ function firstCueNumber(part) {
   return 1;
 }
 
+function insertCueInTimeOrder(body, cue, start) {
+  const text = String(body || "");
+  const timestamps = /(\d\d:\d\d:\d\d[,.]\d{3})\s*-->/g;
+  let match;
+  while ((match = timestamps.exec(text))) {
+    if (ms(match[1]) <= start) continue;
+    const lfBoundary = text.lastIndexOf("\n\n", match.index);
+    const crlfBoundary = text.lastIndexOf("\r\n\r\n", match.index);
+    const boundary = Math.max(lfBoundary < 0 ? -1 : lfBoundary + 2, crlfBoundary < 0 ? -1 : crlfBoundary + 4);
+    if (boundary >= 0) return `${text.slice(0, boundary)}${cue}\n\n${text.slice(boundary)}`;
+    break;
+  }
+  const separator = /\n\s*$/.test(text) ? "\n" : "\n\n";
+  return `${text}${separator}${cue}\n`;
+}
+
 function merge(body, currentBody, otherBody) {
   const part = parse(body);
   const top = parse(currentBody);
@@ -424,20 +440,17 @@ function merge(body, currentBody, otherBody) {
   if (!matches.length) return body;
   const windowStart = Math.min(...part.map((cue) => cue.s));
   const windowEnd = Math.max(...part.map((cue) => cue.e));
-  normalizeBoundaries(top, bottom);
-  const standaloneTop = standaloneCueIds(top, bottom);
-  const standaloneBottom = standaloneCueIds(bottom, top);
-  const segments = simplifyArtificialFragments(buildUnionTimeline(top, bottom))
-    .filter((segment) => segment.e > windowStart && segment.s < windowEnd)
-    .map((segment) => ({ ...segment, s: Math.max(segment.s, windowStart), e: Math.min(segment.e, windowEnd) }))
-    .filter((segment) => segment.e > segment.s);
-  if (!segments.length) return body;
-  const startNumber = firstCueNumber(part);
-  return `${segments.map((segment, index) => [
-    startNumber + index,
-    `${formatTime(segment.s)} --> ${formatTime(segment.e)}`,
-    ...segmentLines(segment, standaloneTop, standaloneBottom),
-  ].join("\n")).join("\n\n")}\n`;
+  const candidate = bottom.find((cue) => cue.s >= windowStart && cue.e <= windowEnd);
+  if (!candidate) return body;
+
+  const extra = [
+    999999,
+    `${formatTime(candidate.s)} --> ${formatTime(candidate.e)}`,
+    EMPTY_TRACK_PLACEHOLDER,
+    `【Range +1 测试】${candidate.t}`,
+  ].join("\n");
+  console.log(`[NFOfficialDual] range-plus-one input=${part.length} output=${part.length + 1}`);
+  return insertCueInTimeOrder(body, extra, candidate.s);
 }
 
 function cache(fullBody, state, resourceId) {
