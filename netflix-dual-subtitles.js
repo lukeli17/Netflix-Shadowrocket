@@ -1,6 +1,6 @@
-/* Netflix Official Dual Subtitles v1.9 pure Range diagnostic for Shadowrocket.
+/* Netflix Official Dual Subtitles v1.10 visible Range diagnostic for Shadowrocket.
  * Runs on the first subtitle response without cache, track matching, or a full-file fetch.
- * Marks one original cue and inserts one non-overlapping cue in a real subtitle gap.
+ * Marks every original cue and announces several non-overlapping inserted cue times.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -414,7 +414,7 @@ function firstCueNumber(part) {
   return 1;
 }
 
-function markOriginalCue(body, target) {
+function markOriginalCue(body, target, label) {
   const text = String(body || "");
   const crlfHead = target.head.replace(/\n/g, "\r\n");
   const matchedHead = text.includes(target.head) ? target.head : crlfHead;
@@ -436,17 +436,19 @@ function markOriginalCue(body, target) {
   const tailAt = blockEnd < text.length ? blockEnd + separator.length : blockEnd;
   const tail = text.slice(tailAt);
   const suffix = tail ? `${separator}${tail}` : newline;
-  return `${text.slice(0, blockEnd)}${newline}【原块】${suffix}`;
+  return `${text.slice(0, blockEnd)}${newline}${String(label).replace(/\n/g, newline)}${suffix}`;
 }
 
-function findProbeGap(part) {
+function findProbeGaps(part, limit = 6) {
+  const gaps = [];
   for (let index = 0; index < part.length - 1; index++) {
-    const start = part[index].e + 100;
-    const availableEnd = part[index + 1].s - 100;
-    if (availableEnd - start < 600) continue;
-    return { s: start, e: Math.min(availableEnd, start + 1500) };
+    const start = part[index].e + 50;
+    const availableEnd = part[index + 1].s - 50;
+    if (availableEnd - start < 350) continue;
+    gaps.push({ s: start, e: Math.min(availableEnd, start + 1000), after: index, number: gaps.length + 1 });
+    if (gaps.length >= limit) break;
   }
-  return null;
+  return gaps;
 }
 
 function insertCueInTimeOrder(body, cue, start) {
@@ -468,16 +470,24 @@ function insertCueInTimeOrder(body, cue, start) {
 }
 
 function probeRange(body, part) {
-  const target = part[0];
-  const gap = findProbeGap(part);
-  let output = markOriginalCue(body, target);
-  if (!output) return body;
-  if (gap) {
+  const gaps = findProbeGaps(part);
+  const announcements = new Map(gaps.map((gap) => [
+    gap.after,
+    `【新增块${gap.number}将在 ${formatTime(gap.s)} 出现】`,
+  ]));
+  let output = body;
+  for (let index = part.length - 1; index >= 0; index--) {
+    const announcement = announcements.get(index);
+    const label = announcement ? `【原块】\n${announcement}` : "【原块】";
+    output = markOriginalCue(output, part[index], label);
+    if (!output) return body;
+  }
+  for (const gap of gaps) {
     const newline = output.includes("\r\n") ? "\r\n" : "\n";
     const extra = [
-      999999,
+      900000 + gap.number,
       `${formatTime(gap.s)} --> ${formatTime(gap.e)}`,
-      "【新增块】",
+      `【新增块${gap.number}】`,
     ].join(newline);
     output = insertCueInTimeOrder(output, extra, gap.s);
   }
@@ -486,8 +496,8 @@ function probeRange(body, part) {
   const contentLength = header($response.headers, "Content-Length") || "-";
   const windowStart = formatTime(part[0].s);
   const windowEnd = formatTime(Math.max(...part.map((cue) => cue.e)));
-  const added = gap ? `${formatTime(gap.s)}..${formatTime(gap.e)}` : "none";
-  console.log(`[NFOfficialDual] pure-range-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length + (gap ? 1 : 0)} window=${windowStart}..${windowEnd} original=${formatTime(target.s)}..${formatTime(target.e)} added=${added} bytes=${String(body).length}->${output.length}`);
+  const added = gaps.length ? gaps.map((gap) => `${gap.number}@${formatTime(gap.s)}..${formatTime(gap.e)}`).join(",") : "none";
+  console.log(`[NFOfficialDual] visible-range-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length + gaps.length} window=${windowStart}..${windowEnd} marked=${part.length} added=${added} bytes=${String(body).length}->${output.length}`);
   return output;
 }
 
