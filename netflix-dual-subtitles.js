@@ -1,6 +1,6 @@
-/* Netflix Official Dual Subtitles v1.10 visible Range diagnostic for Shadowrocket.
+/* Netflix Official Dual Subtitles v1.11 timestamp diagnostic for Shadowrocket.
  * Runs on the first subtitle response without cache, track matching, or a full-file fetch.
- * Marks every original cue and announces several non-overlapping inserted cue times.
+ * Keeps cue count, identifiers, and order unchanged while moving one existing cue earlier.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -451,6 +451,31 @@ function findProbeGaps(part, limit = 6) {
   return gaps;
 }
 
+function chooseTimestampProbe(part) {
+  let fallback = null;
+  for (let index = 1; index < part.length; index++) {
+    const available = part[index].s - part[index - 1].e - 100;
+    if (available >= 1500) return { index, shift: 1500, original: part[index], previous: part[index - 1] };
+    if (available >= 500 && (!fallback || available > fallback.shift)) {
+      fallback = { index, shift: available, original: part[index], previous: part[index - 1] };
+    }
+  }
+  return fallback;
+}
+
+function retimeOriginalCue(body, target, start, end) {
+  const text = String(body || "");
+  const crlfHead = target.head.replace(/\n/g, "\r\n");
+  const matchedHead = text.includes(target.head) ? target.head : crlfHead;
+  const headAt = text.indexOf(matchedHead);
+  if (headAt < 0) return null;
+  const movedHead = matchedHead.replace(
+    /(\d\d:\d\d:\d\d[,.]\d{3})(\s*-->\s*)(\d\d:\d\d:\d\d[,.]\d{3})/,
+    (_, _start, arrow) => `${formatTime(start)}${arrow}${formatTime(end)}`,
+  );
+  return `${text.slice(0, headAt)}${movedHead}${text.slice(headAt + matchedHead.length)}`;
+}
+
 function insertCueInTimeOrder(body, cue, start) {
   const text = String(body || "");
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
@@ -470,34 +495,36 @@ function insertCueInTimeOrder(body, cue, start) {
 }
 
 function probeRange(body, part) {
-  const gaps = findProbeGaps(part);
-  const announcements = new Map(gaps.map((gap) => [
-    gap.after,
-    `【新增块${gap.number}将在 ${formatTime(gap.s)} 出现】`,
-  ]));
+  const probe = chooseTimestampProbe(part);
   let output = body;
   for (let index = part.length - 1; index >= 0; index--) {
-    const announcement = announcements.get(index);
-    const label = announcement ? `【原块】\n${announcement}` : "【原块】";
+    let label = "【原时间】";
+    if (probe && index === probe.index - 1) {
+      label = `【下一条移动块：原 ${formatTime(probe.original.s)}，测试 ${formatTime(probe.original.s - probe.shift)}】`;
+    } else if (probe && index === probe.index) {
+      label = `【移动块：原 ${formatTime(probe.original.s)}，测试 ${formatTime(probe.original.s - probe.shift)}】`;
+    }
     output = markOriginalCue(output, part[index], label);
     if (!output) return body;
   }
-  for (const gap of gaps) {
-    const newline = output.includes("\r\n") ? "\r\n" : "\n";
-    const extra = [
-      900000 + gap.number,
-      `${formatTime(gap.s)} --> ${formatTime(gap.e)}`,
-      `【新增块${gap.number}】`,
-    ].join(newline);
-    output = insertCueInTimeOrder(output, extra, gap.s);
+  if (probe) {
+    output = retimeOriginalCue(
+      output,
+      probe.original,
+      probe.original.s - probe.shift,
+      probe.original.e - probe.shift,
+    );
+    if (!output) return body;
   }
   const requestRange = header($request.headers, "Range") || "-";
   const contentRange = header($response.headers, "Content-Range") || "-";
   const contentLength = header($response.headers, "Content-Length") || "-";
   const windowStart = formatTime(part[0].s);
   const windowEnd = formatTime(Math.max(...part.map((cue) => cue.e)));
-  const added = gaps.length ? gaps.map((gap) => `${gap.number}@${formatTime(gap.s)}..${formatTime(gap.e)}`).join(",") : "none";
-  console.log(`[NFOfficialDual] visible-range-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length + gaps.length} window=${windowStart}..${windowEnd} marked=${part.length} added=${added} bytes=${String(body).length}->${output.length}`);
+  const moved = probe
+    ? `${formatTime(probe.original.s)}..${formatTime(probe.original.e)}=>${formatTime(probe.original.s - probe.shift)}..${formatTime(probe.original.e - probe.shift)}`
+    : "none";
+  console.log(`[NFOfficialDual] timestamp-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length} window=${windowStart}..${windowEnd} marked=${part.length} moved=${moved} bytes=${String(body).length}->${output.length}`);
   return output;
 }
 

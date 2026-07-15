@@ -1,11 +1,11 @@
 #!name = Netflix 最近双官方字幕
-#!desc = 可见探针：每句标记原块，并由前一条字幕预告多个新增块的准确出现时间
+#!desc = 时间轴探针：保持字幕条数、编号和顺序，仅将一个原字幕块提前，并显示原时间与测试时间
 #!author = Minis
 #!homepage = https://github.com/lukeli17/Netflix-Shadowrocket
-#!version = 1.10
+#!version = 1.11
 
 [Script]
-Netflix Official Dual v1.10 Visible Range Probe = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js?v=1.10, timeout=10
+Netflix Official Dual v1.11 Timestamp Probe = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js?v=1.11, timeout=10
 
 [MITM]
 hostname = %APPEND% *.oca.nflxvideo.net
