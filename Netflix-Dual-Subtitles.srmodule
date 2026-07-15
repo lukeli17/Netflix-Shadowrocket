@@ -2,10 +2,10 @@
 #!desc = 当前官方字幕在上、上次选择字幕在下；保留 Netflix 原始分段结构与响应头，不处理字号
 #!author = Minis
 #!homepage = https://github.com/lukeli17/Netflix-Shadowrocket
-#!version = 1.0
+#!version = 1.1
 
 [Script]
-Netflix Official Dual v1.0 = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js, timeout=10
+Netflix Official Dual v1.1 = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js, timeout=10
 
 [MITM]
 hostname = %APPEND% *.oca.nflxvideo.net
