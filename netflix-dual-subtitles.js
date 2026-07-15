@@ -1,6 +1,6 @@
-/* Netflix Official Dual Subtitles v1.11 timestamp diagnostic for Shadowrocket.
+/* Netflix Official Dual Subtitles v1.12 full-track timestamp diagnostic for Shadowrocket.
  * Runs on the first subtitle response without cache, track matching, or a full-file fetch.
- * Keeps cue count, identifiers, and order unchanged while moving one existing cue earlier.
+ * Keeps cue count, identifiers, and order unchanged while delaying every cue by 3 seconds.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -495,24 +495,19 @@ function insertCueInTimeOrder(body, cue, start) {
 }
 
 function probeRange(body, part) {
-  const probe = chooseTimestampProbe(part);
+  const shift = 3000;
   let output = body;
   for (let index = part.length - 1; index >= 0; index--) {
-    let label = "【原时间】";
-    if (probe && index === probe.index - 1) {
-      label = `【下一条移动块：原 ${formatTime(probe.original.s)}，测试 ${formatTime(probe.original.s - probe.shift)}】`;
-    } else if (probe && index === probe.index) {
-      label = `【移动块：原 ${formatTime(probe.original.s)}，测试 ${formatTime(probe.original.s - probe.shift)}】`;
-    }
-    output = markOriginalCue(output, part[index], label);
+    output = markOriginalCue(output, part[index], "【全部延后3秒】");
     if (!output) return body;
   }
-  if (probe) {
+  for (let index = part.length - 1; index >= 0; index--) {
+    const cue = part[index];
     output = retimeOriginalCue(
       output,
-      probe.original,
-      probe.original.s - probe.shift,
-      probe.original.e - probe.shift,
+      cue,
+      cue.s + shift,
+      cue.e + shift,
     );
     if (!output) return body;
   }
@@ -521,10 +516,7 @@ function probeRange(body, part) {
   const contentLength = header($response.headers, "Content-Length") || "-";
   const windowStart = formatTime(part[0].s);
   const windowEnd = formatTime(Math.max(...part.map((cue) => cue.e)));
-  const moved = probe
-    ? `${formatTime(probe.original.s)}..${formatTime(probe.original.e)}=>${formatTime(probe.original.s - probe.shift)}..${formatTime(probe.original.e - probe.shift)}`
-    : "none";
-  console.log(`[NFOfficialDual] timestamp-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length} window=${windowStart}..${windowEnd} marked=${part.length} moved=${moved} bytes=${String(body).length}->${output.length}`);
+  console.log(`[NFOfficialDual] full-timestamp-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length} window=${windowStart}..${windowEnd} shifted=${part.length}@+3000ms bytes=${String(body).length}->${output.length}`);
   return output;
 }
 
