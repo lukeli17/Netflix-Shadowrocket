@@ -1,4 +1,4 @@
-/* Netflix Official Dual Subtitles v1.6 for Shadowrocket.
+/* Netflix Official Dual Subtitles v1.7 for Shadowrocket.
  * Current selected official track on top, previously selected official track below.
  * Uses a compact independent timeline inside the current Netflix Range window.
  * Keeps real cue changes and standalone captions while suppressing small boundary tails.
@@ -12,7 +12,7 @@ const FETCH_TTL = 10000;
 const FAILURE_TTL = 10 * 60 * 1000;
 const HARD_SNAP_TOLERANCE_MS = 40;
 const MIN_PROTECTED_CUE_MS = 240;
-const ARTIFICIAL_FRAGMENT_MS = 500;
+const ARTIFICIAL_FRAGMENT_MS = 1000;
 const STANDALONE_MAX_CROSS_TRACK_OVERLAP_RATIO = 0.18;
 const EMPTY_TRACK_PLACEHOLDER = "\u200B";
 const LEGACY_KEYS = [
