@@ -1,11 +1,11 @@
 #!name = Netflix 最近双官方字幕
-#!desc = 诊断版：标记一个原字幕块并在相同时间新增一块，同时记录 Range 字节与字幕时间窗口
+#!desc = 纯探针：首次字幕 Range 立即标记原块，并在真实无字幕空隙新增一块；不依赖双轨缓存
 #!author = Minis
 #!homepage = https://github.com/lukeli17/Netflix-Shadowrocket
-#!version = 1.8
+#!version = 1.9
 
 [Script]
-Netflix Official Dual v1.8 Range Probe = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js?v=1.8, timeout=10
+Netflix Official Dual v1.9 Pure Range Probe = type=http-response, pattern=^https?:\/\/[^/]+\.oca\.nflxvideo\.net\/.*, requires-body=1, script-path=https://raw.githubusercontent.com/lukeli17/Netflix-Shadowrocket/main/netflix-dual-subtitles.js?v=1.9, timeout=10
 
 [MITM]
 hostname = %APPEND% *.oca.nflxvideo.net

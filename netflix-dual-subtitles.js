@@ -1,7 +1,6 @@
-/* Netflix Official Dual Subtitles v1.8 diagnostic for Shadowrocket.
- * Current selected official track on top, previously selected official track below.
- * Marks one original cue and inserts one new cue at the same timestamp.
- * Logs the byte Range and parsed time window to identify Netflix's acceptance boundary.
+/* Netflix Official Dual Subtitles v1.9 pure Range diagnostic for Shadowrocket.
+ * Runs on the first subtitle response without cache, track matching, or a full-file fetch.
+ * Marks one original cue and inserts one non-overlapping cue in a real subtitle gap.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -415,7 +414,7 @@ function firstCueNumber(part) {
   return 1;
 }
 
-function injectProbe(body, target) {
+function markOriginalCue(body, target) {
   const text = String(body || "");
   const crlfHead = target.head.replace(/\n/g, "\r\n");
   const matchedHead = text.includes(target.head) ? target.head : crlfHead;
@@ -434,34 +433,61 @@ function injectProbe(body, target) {
     separator = "\r\n\r\n";
   }
   const newline = separator.startsWith("\r\n") ? "\r\n" : "\n";
-  const extra = [
-    999999,
-    `${formatTime(target.s)} --> ${formatTime(target.e)}`,
-    EMPTY_TRACK_PLACEHOLDER,
-    "【新增块】",
-  ].join(newline);
   const tailAt = blockEnd < text.length ? blockEnd + separator.length : blockEnd;
   const tail = text.slice(tailAt);
   const suffix = tail ? `${separator}${tail}` : newline;
-  return `${text.slice(0, blockEnd)}${newline}【原块】${separator}${extra}${suffix}`;
+  return `${text.slice(0, blockEnd)}${newline}【原块】${suffix}`;
 }
 
-function merge(body, currentBody, otherBody) {
-  const part = parse(body);
-  const top = parse(currentBody);
-  const bottom = parse(otherBody);
-  if (!part.length || !top.length || !bottom.length) return body;
-  const matches = matchTopCues(part, top).filter(Boolean);
-  if (!matches.length) return body;
+function findProbeGap(part) {
+  for (let index = 0; index < part.length - 1; index++) {
+    const start = part[index].e + 100;
+    const availableEnd = part[index + 1].s - 100;
+    if (availableEnd - start < 600) continue;
+    return { s: start, e: Math.min(availableEnd, start + 1500) };
+  }
+  return null;
+}
+
+function insertCueInTimeOrder(body, cue, start) {
+  const text = String(body || "");
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const separator = `${newline}${newline}`;
+  const timestamps = /(\d\d:\d\d:\d\d[,.]\d{3})\s*-->/g;
+  let match;
+  while ((match = timestamps.exec(text))) {
+    if (ms(match[1]) <= start) continue;
+    const boundary = text.lastIndexOf(separator, match.index);
+    if (boundary >= 0) {
+      const insertAt = boundary + separator.length;
+      return `${text.slice(0, insertAt)}${cue}${separator}${text.slice(insertAt)}`;
+    }
+    break;
+  }
+  return `${text.replace(/\s+$/, "")}${separator}${cue}${newline}`;
+}
+
+function probeRange(body, part) {
   const target = part[0];
-  const output = injectProbe(body, target);
+  const gap = findProbeGap(part);
+  let output = markOriginalCue(body, target);
   if (!output) return body;
+  if (gap) {
+    const newline = output.includes("\r\n") ? "\r\n" : "\n";
+    const extra = [
+      999999,
+      `${formatTime(gap.s)} --> ${formatTime(gap.e)}`,
+      "【新增块】",
+    ].join(newline);
+    output = insertCueInTimeOrder(output, extra, gap.s);
+  }
   const requestRange = header($request.headers, "Range") || "-";
   const contentRange = header($response.headers, "Content-Range") || "-";
   const contentLength = header($response.headers, "Content-Length") || "-";
   const windowStart = formatTime(part[0].s);
   const windowEnd = formatTime(Math.max(...part.map((cue) => cue.e)));
-  console.log(`[NFOfficialDual] range-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length + 1} window=${windowStart}..${windowEnd} probe=${formatTime(target.s)}..${formatTime(target.e)} bytes=${String(body).length}->${output.length}`);
+  const added = gap ? `${formatTime(gap.s)}..${formatTime(gap.e)}` : "none";
+  console.log(`[NFOfficialDual] pure-range-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length + (gap ? 1 : 0)} window=${windowStart}..${windowEnd} original=${formatTime(target.s)}..${formatTime(target.e)} added=${added} bytes=${String(body).length}->${output.length}`);
   return output;
 }
 
@@ -548,49 +574,8 @@ function main() {
   const part = parse(body);
   if (!part.length) return $done({});
 
-  const resourceId = hash($request.url);
-  let state = load();
-  const rendered = render(body, part, state, resourceId);
-  if (rendered !== null) return done(rendered);
-
-  const now = Date.now();
-  const failure = state.failures[resourceId];
-  if (
-    (state.fetch && now - Number(state.fetch.startedAt || 0) < FETCH_TTL) ||
-    now - Number(state.lastFetch || 0) < 1000 ||
-    (failure && now < Number(failure.nextAt || 0))
-  ) {
-    return done(body);
-  }
-
-  state.fetch = { resourceId, startedAt: now };
-  state.lastFetch = now;
-  save(state);
-  $httpClient.get(
-    { url: $request.url, headers: fullRequestHeaders(), timeout: 6 },
-    (error, response, data) => {
-      try {
-        state = load();
-        if (state.fetch?.resourceId === resourceId) state.fetch = null;
-        const status = Number(response && (response.status || response.statusCode) || 0);
-        const fullCues = typeof data === "string" && data.length <= MAX ? parse(data) : [];
-        let action = "failed";
-        if (!error && status === 200 && fullCues.length) {
-          delete state.failures[resourceId];
-          action = cache(data, state, resourceId);
-        } else {
-          markFailure(state, resourceId, Date.now());
-        }
-        save(state);
-        console.log(`[NFOfficialDual] ${action} track=${resourceId} status=${status} bytes=${typeof data === "string" ? data.length : 0} cues=${fullCues.length}`);
-        const output = render(body, part, state, resourceId);
-        done(output === null ? body : output);
-      } catch (error) {
-        console.log(`[NFOfficialDual] callback-error ${String(error)}`);
-        done(body);
-      }
-    },
-  );
+  // Diagnostic build: modify every subtitle Range immediately, before any cache/state path.
+  return done(probeRange(body, part));
 }
 
 try {
