@@ -1,18 +1,14 @@
-/* Netflix Official Dual Subtitles v1.12 full-track timestamp diagnostic for Shadowrocket.
- * Runs on the first subtitle response without cache, track matching, or a full-file fetch.
- * Keeps cue count, identifiers, and order unchanged while delaying every cue by 3 seconds.
+/* Netflix Official Dual Subtitles v2.0 for Shadowrocket.
+ * Keeps every selected-track Range cue identifier and timestamp unchanged.
+ * Uses cached full tracks only to assign each secondary cue deterministically and once.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
-const CACHE_EPOCH = 1;
+const CACHE_EPOCH = 2;
 const MAX = 1048576;
 const CACHE_TTL = 6 * 60 * 60 * 1000;
 const FETCH_TTL = 10000;
 const FAILURE_TTL = 10 * 60 * 1000;
-const HARD_SNAP_TOLERANCE_MS = 40;
-const MIN_PROTECTED_CUE_MS = 240;
-const ARTIFICIAL_FRAGMENT_MS = 1000;
-const STANDALONE_MAX_CROSS_TRACK_OVERLAP_RATIO = 0.18;
 const EMPTY_TRACK_PLACEHOLDER = "\u200B";
 const LEGACY_KEYS = [
   "nf_official_dual_state_v1",
@@ -230,293 +226,166 @@ function matchTopCues(part, top) {
   return matches;
 }
 
-function snapBoundaries(top, bottom, side) {
-  const topEvents = top.map((cue) => ({ cue, time: cue[side] })).sort((a, b) => a.time - b.time);
-  const bottomEvents = bottom.map((cue) => ({ cue, time: cue[side] })).sort((a, b) => a.time - b.time);
-  const candidates = [];
-  let low = 0;
-  for (let i = 0; i < topEvents.length; i++) {
-    const time = topEvents[i].time;
-    while (low < bottomEvents.length && bottomEvents[low].time < time - HARD_SNAP_TOLERANCE_MS) low++;
-    for (let j = low; j < bottomEvents.length && bottomEvents[j].time <= time + HARD_SNAP_TOLERANCE_MS; j++) {
-      candidates.push({ i, j, distance: Math.abs(time - bottomEvents[j].time) });
-    }
-  }
-  candidates.sort((a, b) => a.distance - b.distance || a.i - b.i || a.j - b.j);
-  const usedTop = new Set();
-  const usedBottom = new Set();
-  for (const candidate of candidates) {
-    if (usedTop.has(candidate.i) || usedBottom.has(candidate.j)) continue;
-    const topEvent = topEvents[candidate.i];
-    const bottomEvent = bottomEvents[candidate.j];
-    const canonical = Math.round((topEvent.time + bottomEvent.time) / 2);
-    topEvent.cue[side] = canonical;
-    bottomEvent.cue[side] = canonical;
-    usedTop.add(candidate.i);
-    usedBottom.add(candidate.j);
-  }
+function overlapMs(a, b) {
+  return Math.max(0, Math.min(a.e, b.e) - Math.max(a.s, b.s));
 }
 
-function normalizeBoundaries(top, bottom) {
-  snapBoundaries(top, bottom, "s");
-  snapBoundaries(top, bottom, "e");
-  for (const cue of [...top, ...bottom]) {
-    const protectedDuration = Math.min(MIN_PROTECTED_CUE_MS, (cue.originalE - cue.originalS) / 2);
-    if (cue.e <= cue.s || cue.e - cue.s < protectedDuration) {
-      cue.s = cue.originalS;
-      cue.e = cue.originalE;
-    }
-  }
+function assignmentScore(top, bottom, overlap) {
+  const topDuration = Math.max(1, top.e - top.s);
+  const bottomDuration = Math.max(1, bottom.e - bottom.s);
+  const topCoverage = overlap / topDuration;
+  const bottomCoverage = overlap / bottomDuration;
+  const centerDistance = Math.abs((top.s + top.e) / 2 - (bottom.s + bottom.e) / 2);
+  return bottomCoverage * 5 + topCoverage * 2 - centerDistance / 5000;
 }
 
-function activeText(active, keepMarkup) {
-  const cues = [...active.values()].sort((a, b) => a.sourceIndex - b.sourceIndex);
-  const seen = new Set();
-  const text = [];
-  for (const cue of cues) {
-    const value = keepMarkup ? cue.raw : cue.t;
-    if (!seen.has(value)) {
-      seen.add(value);
-      text.push(value);
-    }
-  }
-  return text.join(" ");
-}
-
-function buildUnionTimeline(top, bottom) {
-  const events = new Map();
-  function add(time, action, track, cue) {
-    if (!events.has(time)) events.set(time, []);
-    events.get(time).push({ action, track, cue });
-  }
-  for (const cue of top) {
-    add(cue.s, "start", "top", cue);
-    add(cue.e, "end", "top", cue);
-  }
-  for (const cue of bottom) {
-    add(cue.s, "start", "bottom", cue);
-    add(cue.e, "end", "bottom", cue);
-  }
-
-  const times = [...events.keys()].sort((a, b) => a - b);
-  const activeTop = new Map();
-  const activeBottom = new Map();
-  const segments = [];
-  for (let i = 0; i < times.length - 1; i++) {
-    const time = times[i];
-    const atTime = events.get(time);
-    for (const event of atTime.filter((item) => item.action === "end")) {
-      (event.track === "top" ? activeTop : activeBottom).delete(event.cue.id);
-    }
-    for (const event of atTime.filter((item) => item.action === "start")) {
-      (event.track === "top" ? activeTop : activeBottom).set(event.cue.id, event.cue);
-    }
-    const end = times[i + 1];
-    if (end <= time || (!activeTop.size && !activeBottom.size)) continue;
-    const topText = activeText(activeTop, true);
-    const bottomText = activeText(activeBottom, false);
-    const topIds = new Set(activeTop.keys());
-    const bottomIds = new Set(activeBottom.keys());
-    const previous = segments[segments.length - 1];
-    if (previous && previous.e === time && previous.top === topText && previous.bottom === bottomText) {
-      previous.e = end;
-      for (const id of topIds) previous.topIds.add(id);
-      for (const id of bottomIds) previous.bottomIds.add(id);
-    } else {
-      segments.push({ s: time, e: end, top: topText, bottom: bottomText, topIds, bottomIds });
-    }
-  }
-  return segments;
-}
-
-function stateIsSubset(candidate, container) {
-  if (!candidate || !container) return false;
-  return [...candidate.topIds].every((id) => container.topIds.has(id)) &&
-    [...candidate.bottomIds].every((id) => container.bottomIds.has(id));
-}
-
-function simplifyArtificialFragments(segments) {
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let i = 0; i < segments.length; i++) {
-      const current = segments[i];
-      if (current.e - current.s > ARTIFICIAL_FRAGMENT_MS) continue;
-      const previous = segments[i - 1];
-      const next = segments[i + 1];
-      const neighborTopIds = new Set([...(previous?.topIds || []), ...(next?.topIds || [])]);
-      const neighborBottomIds = new Set([...(previous?.bottomIds || []), ...(next?.bottomIds || [])]);
-      const unique = [...current.topIds].some((id) => !neighborTopIds.has(id)) ||
-        [...current.bottomIds].some((id) => !neighborBottomIds.has(id));
-      if (unique) continue;
-      if (previous && next && previous.e === current.s && current.e === next.s) {
-        const boundary = Math.round((current.s + current.e) / 2);
-        previous.e = boundary;
-        next.s = boundary;
-      } else if (previous && previous.e === current.s && stateIsSubset(current, previous)) {
-        previous.e = Math.round((current.s + current.e) / 2);
-      } else if (next && current.e === next.s && stateIsSubset(current, next)) {
-        next.s = Math.round((current.s + current.e) / 2);
-      } else if (!previous && next && current.e === next.s) {
-        next.s = current.s;
-      } else if (previous && !next && previous.e === current.s) {
-        previous.e = current.e;
-      } else {
-        continue;
-      }
-      segments.splice(i, 1);
-      changed = true;
-      break;
-    }
-  }
-  return segments;
-}
-
-function standaloneCueIds(cues, opposite) {
-  const ids = new Set();
-  let low = 0;
-  for (const cue of cues) {
-    while (low < opposite.length && opposite[low].e <= cue.s) low++;
-    let overlap = 0;
-    for (let i = low; i < opposite.length && opposite[i].s < cue.e; i++) {
-      overlap += Math.max(0, Math.min(cue.e, opposite[i].e) - Math.max(cue.s, opposite[i].s));
-    }
-    if (Math.min(1, overlap / Math.max(1, cue.e - cue.s)) < STANDALONE_MAX_CROSS_TRACK_OVERLAP_RATIO) ids.add(cue.id);
-  }
-  return ids;
-}
-
-function segmentLines(segment, standaloneTop, standaloneBottom) {
-  if (segment.top && segment.bottom) return [segment.top, segment.bottom];
-  if (segment.top) {
-    const standalone = segment.topIds.size && [...segment.topIds].every((id) => standaloneTop.has(id));
-    return standalone ? [segment.top] : [segment.top, EMPTY_TRACK_PLACEHOLDER];
-  }
-  const standalone = segment.bottomIds.size && [...segment.bottomIds].every((id) => standaloneBottom.has(id));
-  return standalone ? [segment.bottom] : [EMPTY_TRACK_PLACEHOLDER, segment.bottom];
-}
-
-function formatTime(value) {
-  let remaining = Math.max(0, Math.round(value));
-  const hours = Math.floor(remaining / 3600000);
-  remaining %= 3600000;
-  const minutes = Math.floor(remaining / 60000);
-  remaining %= 60000;
-  const seconds = Math.floor(remaining / 1000);
-  const millis = remaining % 1000;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
-}
-
-function firstCueNumber(part) {
-  for (const line of String(part[0]?.head || "").split("\n")) {
-    if (/^\d+$/.test(line.trim())) return Number(line.trim());
-  }
-  return 1;
-}
-
-function markOriginalCue(body, target, label) {
-  const text = String(body || "");
-  const crlfHead = target.head.replace(/\n/g, "\r\n");
-  const matchedHead = text.includes(target.head) ? target.head : crlfHead;
-  const headAt = text.indexOf(matchedHead);
-  if (headAt < 0) return null;
-  const searchAt = headAt + matchedHead.length;
-  const lfBoundary = text.indexOf("\n\n", searchAt);
-  const crlfBoundary = text.indexOf("\r\n\r\n", searchAt);
-  let blockEnd = text.length;
-  let separator = text.includes("\r\n") ? "\r\n\r\n" : "\n\n";
-  if (lfBoundary >= 0 && (crlfBoundary < 0 || lfBoundary < crlfBoundary)) {
-    blockEnd = lfBoundary;
-    separator = "\n\n";
-  } else if (crlfBoundary >= 0) {
-    blockEnd = crlfBoundary;
-    separator = "\r\n\r\n";
-  }
-  const newline = separator.startsWith("\r\n") ? "\r\n" : "\n";
-  const tailAt = blockEnd < text.length ? blockEnd + separator.length : blockEnd;
-  const tail = text.slice(tailAt);
-  const suffix = tail ? `${separator}${tail}` : newline;
-  return `${text.slice(0, blockEnd)}${newline}${String(label).replace(/\n/g, newline)}${suffix}`;
-}
-
-function findProbeGaps(part, limit = 6) {
-  const gaps = [];
-  for (let index = 0; index < part.length - 1; index++) {
-    const start = part[index].e + 50;
-    const availableEnd = part[index + 1].s - 50;
-    if (availableEnd - start < 350) continue;
-    gaps.push({ s: start, e: Math.min(availableEnd, start + 1000), after: index, number: gaps.length + 1 });
-    if (gaps.length >= limit) break;
-  }
-  return gaps;
-}
-
-function chooseTimestampProbe(part) {
-  let fallback = null;
-  for (let index = 1; index < part.length; index++) {
-    const available = part[index].s - part[index - 1].e - 100;
-    if (available >= 1500) return { index, shift: 1500, original: part[index], previous: part[index - 1] };
-    if (available >= 500 && (!fallback || available > fallback.shift)) {
-      fallback = { index, shift: available, original: part[index], previous: part[index - 1] };
-    }
-  }
-  return fallback;
-}
-
-function retimeOriginalCue(body, target, start, end) {
-  const text = String(body || "");
-  const crlfHead = target.head.replace(/\n/g, "\r\n");
-  const matchedHead = text.includes(target.head) ? target.head : crlfHead;
-  const headAt = text.indexOf(matchedHead);
-  if (headAt < 0) return null;
-  const movedHead = matchedHead.replace(
-    /(\d\d:\d\d:\d\d[,.]\d{3})(\s*-->\s*)(\d\d:\d\d:\d\d[,.]\d{3})/,
-    (_, _start, arrow) => `${formatTime(start)}${arrow}${formatTime(end)}`,
-  );
-  return `${text.slice(0, headAt)}${movedHead}${text.slice(headAt + matchedHead.length)}`;
-}
-
-function insertCueInTimeOrder(body, cue, start) {
-  const text = String(body || "");
-  const newline = text.includes("\r\n") ? "\r\n" : "\n";
-  const separator = `${newline}${newline}`;
-  const timestamps = /(\d\d:\d\d:\d\d[,.]\d{3})\s*-->/g;
+function splitDialogueTurns(text) {
+  const value = clean(text);
+  if (!/^\s*-/.test(value) || !/\s+-\s*\S/.test(value)) return [];
+  const turns = [];
+  const pattern = /(?:^|\s)(-\s*\S[\s\S]*?)(?=\s+-\s*\S|$)/g;
   let match;
-  while ((match = timestamps.exec(text))) {
-    if (ms(match[1]) <= start) continue;
-    const boundary = text.lastIndexOf(separator, match.index);
-    if (boundary >= 0) {
-      const insertAt = boundary + separator.length;
-      return `${text.slice(0, insertAt)}${cue}${separator}${text.slice(insertAt)}`;
-    }
-    break;
+  while ((match = pattern.exec(value))) {
+    const turn = clean(match[1]);
+    if (turn) turns.push(turn);
   }
-  return `${text.replace(/\s+$/, "")}${separator}${cue}${newline}`;
+  return turns.length >= 2 ? turns : [];
 }
 
-function probeRange(body, part) {
-  const shift = 3000;
-  let output = body;
-  for (let index = part.length - 1; index >= 0; index--) {
-    output = markOriginalCue(output, part[index], "【全部延后3秒】");
-    if (!output) return body;
+function splitNaturalClauses(text) {
+  const value = clean(text);
+  if (value.length < 24) return [];
+  const marked = value
+    .replace(/([,;:!?])\s+/g, "$1\u0000")
+    .replace(/\.\s+(?=[A-Z"'])/g, ".\u0000")
+    .replace(/\s+(?=(?:and|but|because|so|while|when|although)\b)/gi, "\u0000");
+  const clauses = marked.split("\u0000").map(clean).filter(Boolean);
+  if (clauses.length < 2) return [];
+  if (clauses.some((clause) => clause.length < 5)) return [];
+  return clauses;
+}
+
+function isShortRepeatable(cue) {
+  const value = clean(cue.t);
+  const words = value.match(/[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*/g) || [];
+  const duration = cue.e - cue.s;
+  return value.length <= 45 && duration <= 4000 && (!words.length || words.length <= 8);
+}
+
+function distributeFragments(byTop, secondary, candidates, fragments, mode) {
+  const distributed = new Map();
+  for (let index = 0; index < fragments.length; index++) {
+    let owner;
+    if (fragments.length >= candidates.length) {
+      const ownerIndex = Math.min(candidates.length - 1, Math.floor(index * candidates.length / fragments.length));
+      owner = candidates[ownerIndex].primary;
+    } else {
+      const duration = Math.max(1, secondary.e - secondary.s);
+      const virtualTime = secondary.s + ((index + 0.5) / fragments.length) * duration;
+      const containing = candidates.filter(({ primary }) => primary.s <= virtualTime && primary.e >= virtualTime);
+      const pool = containing.length ? containing : candidates;
+      owner = pool.reduce((best, candidate) => {
+        const distance = Math.abs((candidate.primary.s + candidate.primary.e) / 2 - virtualTime);
+        return !best || distance < best.distance ? { candidate, distance } : best;
+      }, null).candidate.primary;
+    }
+    if (!distributed.has(owner.id)) distributed.set(owner.id, []);
+    distributed.get(owner.id).push(fragments[index]);
   }
-  for (let index = part.length - 1; index >= 0; index--) {
-    const cue = part[index];
-    output = retimeOriginalCue(
-      output,
-      cue,
-      cue.s + shift,
-      cue.e + shift,
-    );
-    if (!output) return body;
+  if (distributed.size < 2) return false;
+  for (const [topId, values] of distributed) {
+    addAssignment(byTop, topId, secondary.id, values.join(" "), secondary.sourceIndex, mode);
   }
-  const requestRange = header($request.headers, "Range") || "-";
-  const contentRange = header($response.headers, "Content-Range") || "-";
-  const contentLength = header($response.headers, "Content-Length") || "-";
-  const windowStart = formatTime(part[0].s);
-  const windowEnd = formatTime(Math.max(...part.map((cue) => cue.e)));
-  console.log(`[NFOfficialDual] full-timestamp-probe request=${requestRange} response=${contentRange} length=${contentLength} cues=${part.length}->${part.length} window=${windowStart}..${windowEnd} shifted=${part.length}@+3000ms bytes=${String(body).length}->${output.length}`);
+  return true;
+}
+
+function addAssignment(byTop, topId, bottomId, text, order, mode) {
+  if (!byTop.has(topId)) byTop.set(topId, []);
+  byTop.get(topId).push({ bottomId, text, order, mode });
+}
+
+function buildAssignments(top, bottom) {
+  const byTop = new Map();
+  let assigned = 0;
+  let skipped = 0;
+  let split = 0;
+  let repeated = 0;
+  let low = 0;
+
+  for (const secondary of bottom) {
+    while (low < top.length && top[low].e <= secondary.s) low++;
+    const candidates = [];
+    for (let index = low; index < top.length && top[index].s < secondary.e; index++) {
+      const primary = top[index];
+      const overlap = overlapMs(primary, secondary);
+      if (!overlap) continue;
+      const primaryDuration = Math.max(1, primary.e - primary.s);
+      const secondaryDuration = Math.max(1, secondary.e - secondary.s);
+      if (overlap < 120 || overlap / Math.min(primaryDuration, secondaryDuration) < 0.15) continue;
+      candidates.push({ primary, overlap, score: assignmentScore(primary, secondary, overlap) });
+    }
+    if (!candidates.length) {
+      skipped++;
+      continue;
+    }
+
+    candidates.sort((a, b) => a.primary.s - b.primary.s || a.primary.id - b.primary.id);
+    let handled = false;
+    if (candidates.length >= 2) {
+      const turns = splitDialogueTurns(secondary.t);
+      const fragments = turns.length >= 2 ? turns : splitNaturalClauses(secondary.t);
+      if (fragments.length >= 2 && distributeFragments(byTop, secondary, candidates, fragments, turns.length ? "dialogue" : "clause")) {
+        handled = true;
+        split++;
+      }
+    }
+
+    if (!handled && isShortRepeatable(secondary) && candidates.length >= 2) {
+      const repeatOwners = candidates
+        .filter(({ primary, overlap }) => overlap >= 250 && (
+          overlap / Math.max(1, primary.e - primary.s) >= 0.3 &&
+          overlap / Math.max(1, secondary.e - secondary.s) >= 0.3
+        ))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2)
+        .sort((a, b) => a.primary.id - b.primary.id);
+      if (repeatOwners.length === 2 && Math.abs(repeatOwners[0].primary.id - repeatOwners[1].primary.id) === 1) {
+        for (const owner of repeatOwners) {
+          addAssignment(byTop, owner.primary.id, secondary.id, secondary.t, secondary.sourceIndex, "repeat-short");
+        }
+        handled = true;
+        repeated++;
+      }
+    }
+
+    if (!handled) {
+      const owner = candidates.reduce((best, candidate) => !best || candidate.score > best.score ? candidate : best, null).primary;
+      addAssignment(byTop, owner.id, secondary.id, secondary.t, secondary.sourceIndex, "single");
+    }
+    assigned++;
+  }
+
+  for (const values of byTop.values()) values.sort((a, b) => a.order - b.order);
+  return { byTop, assigned, skipped, split, repeated };
+}
+
+function merge(body, currentBody, otherBody) {
+  const part = parse(body);
+  const top = parse(currentBody);
+  const bottom = parse(otherBody);
+  if (!part.length || !top.length || !bottom.length) return body;
+  const matches = matchTopCues(part, top);
+  if (!matches.some(Boolean)) return body;
+  const assignments = buildAssignments(top, bottom);
+  let mapped = 0;
+  const output = `${part.map((cue, index) => {
+    const matched = matches[index];
+    const values = matched ? assignments.byTop.get(matched.id) || [] : [];
+    if (values.length) mapped++;
+    const lower = values.map((value) => value.text).join(" ");
+    return `${cue.head}\n${cue.raw}\n${lower || EMPTY_TRACK_PLACEHOLDER}`;
+  }).join("\n\n")}\n`;
+  console.log(`[NFOfficialDual] skeleton-merge range=${part.length}->${part.length} mapped=${mapped} secondary=${assignments.assigned}/${bottom.length} split=${assignments.split} repeatShort=${assignments.repeated} skipped=${assignments.skipped} bytes=${String(body).length}->${output.length}`);
   return output;
 }
 
@@ -603,8 +472,49 @@ function main() {
   const part = parse(body);
   if (!part.length) return $done({});
 
-  // Diagnostic build: modify every subtitle Range immediately, before any cache/state path.
-  return done(probeRange(body, part));
+  const resourceId = hash($request.url);
+  let state = load();
+  const rendered = render(body, part, state, resourceId);
+  if (rendered !== null) return done(rendered);
+
+  const now = Date.now();
+  const failure = state.failures[resourceId];
+  if (
+    (state.fetch && now - Number(state.fetch.startedAt || 0) < FETCH_TTL) ||
+    now - Number(state.lastFetch || 0) < 1000 ||
+    (failure && now < Number(failure.nextAt || 0))
+  ) {
+    return done(body);
+  }
+
+  state.fetch = { resourceId, startedAt: now };
+  state.lastFetch = now;
+  save(state);
+  $httpClient.get(
+    { url: $request.url, headers: fullRequestHeaders(), timeout: 6 },
+    (error, response, data) => {
+      try {
+        state = load();
+        if (state.fetch?.resourceId === resourceId) state.fetch = null;
+        const status = Number(response && (response.status || response.statusCode) || 0);
+        const fullCues = typeof data === "string" && data.length <= MAX ? parse(data) : [];
+        let action = "failed";
+        if (!error && status === 200 && fullCues.length) {
+          delete state.failures[resourceId];
+          action = cache(data, state, resourceId);
+        } else {
+          markFailure(state, resourceId, Date.now());
+        }
+        save(state);
+        console.log(`[NFOfficialDual] ${action} track=${resourceId} status=${status} bytes=${typeof data === "string" ? data.length : 0} cues=${fullCues.length}`);
+        const output = render(body, part, state, resourceId);
+        done(output === null ? body : output);
+      } catch (error) {
+        console.log(`[NFOfficialDual] callback-error ${String(error)}`);
+        done(body);
+      }
+    },
+  );
 }
 
 try {
