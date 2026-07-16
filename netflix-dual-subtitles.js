@@ -1,6 +1,8 @@
-/* Netflix Official Dual Subtitles v2.0 for Shadowrocket.
+/* Netflix Official Dual Subtitles v2.3 for Shadowrocket.
+ * Author: Minis
+ * Repository: https://github.com/lukeli17/Netflix-Shadowrocket
  * Keeps every selected-track Range cue identifier and timestamp unchanged.
- * Uses cached full tracks only to assign each secondary cue deterministically and once.
+ * Maps cached secondary text only inside the selected track's existing cue skeleton.
  */
 const KEY = "nf_official_dual_state";
 const SCHEMA = 1;
@@ -9,7 +11,6 @@ const MAX = 1048576;
 const CACHE_TTL = 6 * 60 * 60 * 1000;
 const FETCH_TTL = 10000;
 const FAILURE_TTL = 10 * 60 * 1000;
-const EMPTY_TRACK_PLACEHOLDER = "\u200B";
 const LEGACY_KEYS = [
   "nf_official_dual_state_v1",
   "nf_official_dual_state_v2",
@@ -112,7 +113,10 @@ function parse(value) {
     if (index < 0 || lines.length <= index + 1) continue;
     const match = lines[index].match(/(\d\d:\d\d:\d\d[,.]\d{3})\s*-->\s*(\d\d:\d\d:\d\d[,.]\d{3})/);
     if (!match) continue;
-    const rawText = preserveMarkup(lines.slice(index + 1).join("\n"));
+    const sourceLines = lines.slice(index + 1)
+      .map((line) => preserveMarkup(line))
+      .filter((line) => clean(line));
+    const rawText = sourceLines.join(" ");
     const text = clean(rawText);
     if (text) {
       const sourceIndex = out.length;
@@ -126,6 +130,7 @@ function parse(value) {
         originalE: ms(match[2]),
         t: text,
         raw: rawText,
+        lines: sourceLines.map(clean).filter(Boolean),
       });
     }
   }
@@ -239,6 +244,13 @@ function assignmentScore(top, bottom, overlap) {
   return bottomCoverage * 5 + topCoverage * 2 - centerDistance / 5000;
 }
 
+function isCcOnlyCue(cue) {
+  const value = clean(cue.t);
+  if (/[♪♫]/.test(value)) return true;
+  const withoutDescriptions = value.replace(/\[[^\]]+\]/g, "").replace(/[-–—\s]/g, "");
+  return !/[A-Za-z0-9\u3400-\u9fff]/.test(withoutDescriptions);
+}
+
 function splitDialogueTurns(text) {
   const value = clean(text);
   if (!/^\s*-/.test(value) || !/\s+-\s*\S/.test(value)) return [];
@@ -252,24 +264,132 @@ function splitDialogueTurns(text) {
   return turns.length >= 2 ? turns : [];
 }
 
-function splitNaturalClauses(text) {
+function mergeLeadingInterjections(fragments) {
+  const out = [];
+  let pending = "";
+  const shortLead = /^(?:[-–—]\s*)?(?:ahem|ah|aw|eh|heh|hm+|mm+|mhm|oh|ooh|uh|uh-huh|um|well)[.!?,…-]*$/i;
+  for (const fragment of fragments.map(clean).filter(Boolean)) {
+    if (shortLead.test(fragment)) {
+      pending = clean(`${pending} ${fragment}`);
+      continue;
+    }
+    out.push(clean(`${pending} ${fragment}`));
+    pending = "";
+  }
+  if (pending) {
+    if (out.length) out[out.length - 1] = clean(`${out[out.length - 1]} ${pending}`);
+    else out.push(pending);
+  }
+  return out;
+}
+
+function splitSentences(text) {
   const value = clean(text);
   if (value.length < 24) return [];
   const marked = value
-    .replace(/([,;:!?])\s+/g, "$1\u0000")
-    .replace(/\.\s+(?=[A-Z"'])/g, ".\u0000")
-    .replace(/\s+(?=(?:and|but|because|so|while|when|although)\b)/gi, "\u0000");
-  const clauses = marked.split("\u0000").map(clean).filter(Boolean);
-  if (clauses.length < 2) return [];
-  if (clauses.some((clause) => clause.length < 5)) return [];
+    .replace(/([。！？]+)(["'”’]?)\s*(?=\S)/g, "$1$2\u0000")
+    .replace(/([!?]+|\.{1,3})(["'”’]?)\s+(?=(?:["'“”‘’]*[-–—]?\s*)?[A-Z0-9])/g, "$1$2\u0000");
+  const sentences = mergeLeadingInterjections(marked.split("\u0000"));
+  return sentences.length >= 2 ? sentences : [];
+}
+
+function splitSourceLines(cue) {
+  const lines = (cue.lines || []).map(clean).filter(Boolean);
+  return lines.length >= 2 && lines.every((line) => line.length >= 2) ? lines : [];
+}
+
+function splitStrongClauses(text) {
+  const value = clean(text);
+  if (value.length < 24) return [];
+  const marked = value
+    .replace(/([;:])\s+/g, "$1\u0000")
+    .replace(/,\s+(?=(?:but|and|yet|because|if|when|while|although|though)\s+\S)/gi, ",\u0000");
+  const clauses = mergeLeadingInterjections(marked.split("\u0000"));
+  const safeShort = /^(?:yes|no|okay|ok|right|sure)[.!?,…-]*$/i;
+  if (clauses.length < 2 || clauses.some((clause) => clause.length < 5 && !safeShort.test(clause))) return [];
   return clauses;
+}
+
+function splitSecondaryCue(cue) {
+  const sourceLines = splitSourceLines(cue);
+  if (sourceLines.length >= 2) return { fragments: sourceLines, mode: "source-line" };
+  const turns = splitDialogueTurns(cue.t);
+  if (turns.length >= 2) return { fragments: turns, mode: "dialogue" };
+  const sentences = splitSentences(cue.t);
+  if (sentences.length >= 2) return { fragments: sentences, mode: "sentence" };
+  const clauses = splitStrongClauses(cue.t);
+  return { fragments: clauses, mode: clauses.length >= 2 ? "clause" : "" };
+}
+
+function splitByTiming(cue, candidates) {
+  const value = clean(cue.t);
+  if (!value || candidates.length < 2) return [];
+  if (/^(?:\s*(?:\[[^\]]+\]|\([^)]*\)|[♪♫]+)\s*)+$/.test(value)) return [];
+  const cjkCount = (value.match(/[\u3400-\u9fff]/g) || []).length;
+  const visibleLength = value.replace(/\s/g, "").length;
+  const characterMode = cjkCount >= Math.max(2, visibleLength * 0.4);
+  const tokens = characterMode ? Array.from(value).filter((token) => !/\s/.test(token)) : value.split(/\s+/).filter(Boolean);
+  if (tokens.length < candidates.length * 2) return [];
+
+  const weights = candidates.map(({ primary }) => overlapMs(primary, cue));
+  if (weights.some((weight) => weight < 600)) return [];
+  if (characterMode) {
+    const minimumWeight = Math.min(...weights);
+    const maximumWeight = Math.max(...weights);
+    if (minimumWeight / maximumWeight < 0.6) return [];
+    const punctuated = value
+      .replace(/([，；：。！？])\s*(?=\S)/g, "$1\u0000")
+      .split("\u0000")
+      .map(clean)
+      .filter(Boolean);
+    if (punctuated.length >= 2) return punctuated;
+    if (cjkCount < candidates.length * 6) return [];
+  }
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  if (!totalWeight) return [];
+  const tokenWeights = tokens.map((token, index) => token.length + (index ? 1 : 0));
+  const totalTextWeight = tokenWeights.reduce((sum, weight) => sum + weight, 0);
+  const cuts = [];
+  let consumedWeight = 0;
+  let previousCut = 0;
+
+  for (let part = 0; part < candidates.length - 1; part++) {
+    consumedWeight += weights[part];
+    const target = consumedWeight / totalWeight;
+    const minimum = previousCut + 1;
+    const maximum = tokens.length - (candidates.length - part - 1);
+    let running = 0;
+    let best = null;
+    for (let index = 0; index < tokens.length; index++) {
+      running += tokenWeights[index];
+      const cut = index + 1;
+      if (cut < minimum || cut > maximum) continue;
+      const distance = Math.abs(running / totalTextWeight - target);
+      const punctuationBoundary = /(?:[,;:!?…]|\.{1,3})["'”’)]*$/.test(tokens[index]);
+      const score = distance - (punctuationBoundary && distance <= 0.2 ? 0.15 : 0);
+      if (!best || score < best.score) best = { cut, score };
+    }
+    if (!best) return [];
+    cuts.push(best.cut);
+    previousCut = best.cut;
+  }
+
+  const fragments = [];
+  let start = 0;
+  for (const cut of [...cuts, tokens.length]) {
+    fragments.push(tokens.slice(start, cut).join(characterMode ? "" : " "));
+    start = cut;
+  }
+  return fragments.every((fragment) => clean(fragment)) ? fragments : [];
 }
 
 function isShortRepeatable(cue) {
   const value = clean(cue.t);
+  const cjk = value.match(/[\u3400-\u9fff]/g) || [];
   const words = value.match(/[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*/g) || [];
   const duration = cue.e - cue.s;
-  return value.length <= 45 && duration <= 4000 && (!words.length || words.length <= 8);
+  if (cjk.length) return cjk.length <= 6 && duration <= 4000;
+  return value.length <= 45 && duration <= 4000 && words.length <= 8;
 }
 
 function distributeFragments(byTop, secondary, candidates, fragments, mode) {
@@ -324,6 +444,10 @@ function buildAssignments(top, bottom) {
       if (overlap < 120 || overlap / Math.min(primaryDuration, secondaryDuration) < 0.15) continue;
       candidates.push({ primary, overlap, score: assignmentScore(primary, secondary, overlap) });
     }
+    const contentCandidates = candidates.filter(({ primary }) => !isCcOnlyCue(primary));
+    if (contentCandidates.length && contentCandidates.length < candidates.length) {
+      candidates.splice(0, candidates.length, ...contentCandidates);
+    }
     if (!candidates.length) {
       skipped++;
       continue;
@@ -332,9 +456,12 @@ function buildAssignments(top, bottom) {
     candidates.sort((a, b) => a.primary.s - b.primary.s || a.primary.id - b.primary.id);
     let handled = false;
     if (candidates.length >= 2) {
-      const turns = splitDialogueTurns(secondary.t);
-      const fragments = turns.length >= 2 ? turns : splitNaturalClauses(secondary.t);
-      if (fragments.length >= 2 && distributeFragments(byTop, secondary, candidates, fragments, turns.length ? "dialogue" : "clause")) {
+      let segmentation = splitSecondaryCue(secondary);
+      if (segmentation.fragments.length < 2) {
+        const timed = splitByTiming(secondary, candidates);
+        if (timed.length >= 2) segmentation = { fragments: timed, mode: "timed" };
+      }
+      if (segmentation.fragments.length >= 2 && distributeFragments(byTop, secondary, candidates, segmentation.fragments, segmentation.mode)) {
         handled = true;
         split++;
       }
@@ -383,7 +510,7 @@ function merge(body, currentBody, otherBody) {
     const values = matched ? assignments.byTop.get(matched.id) || [] : [];
     if (values.length) mapped++;
     const lower = values.map((value) => value.text).join(" ");
-    return `${cue.head}\n${cue.raw}\n${lower || EMPTY_TRACK_PLACEHOLDER}`;
+    return lower ? `${cue.head}\n${cue.raw}\n${lower}` : `${cue.head}\n${cue.raw}`;
   }).join("\n\n")}\n`;
   console.log(`[NFOfficialDual] skeleton-merge range=${part.length}->${part.length} mapped=${mapped} secondary=${assignments.assigned}/${bottom.length} split=${assignments.split} repeatShort=${assignments.repeated} skipped=${assignments.skipped} bytes=${String(body).length}->${output.length}`);
   return output;
