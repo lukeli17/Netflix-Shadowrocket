@@ -1,5 +1,5 @@
-/* Netflix Official Dual Subtitles v2.3 for Shadowrocket.
- * Author: Minis
+/* Netflix Official Dual Subtitles v2.3.1 for Shadowrocket.
+ * Author: Leo
  * Repository: https://github.com/lukeli17/Netflix-Shadowrocket
  * Keeps every selected-track Range cue identifier and timestamp unchanged.
  * Maps cached secondary text only inside the selected track's existing cue skeleton.
